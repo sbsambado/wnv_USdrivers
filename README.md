@@ -4,13 +4,14 @@ manuscript in prep - code is subject to change.
 
 **authors:** Samantha B. Sambado, Váleri N. Vasquez, Johannah Farner, Rachel L. Fay, Samantha Bents, Joshua E. Lazaro, Talya Shragai, Isabel O. Delwel, Mauricio Cruz-Loya, and Erin A. Mordecai
 
-**corresponding author** Samantha Sambado (ssambado@stanford.edu) / (sbsambado@gmail.com)
+**corresponding author:** Samantha Sambado (ssambado@stanford.edu) 
 
 *Note:* These files are meant to show the workflow of various components. Data files will be hosted on Dryad (link coming soon).
 
 **Software**
-+ R version 4.4.1
+R version 4.4.1
 
-R package versions
-+ 
+R packages:
+
+
 
