@@ -1,0 +1,144 @@
+---
+title: "4_GAMAnalysis"
+output: html_document
+date: "2025-08-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## upload necessary packages
+library(ggcorrplot)
+library(mgcv)
+library(gam.hp)
+library(gratia)
+
+## upload necessary data
+covariates <- read.csv("data/processed/gam_covariates_noR0.csv") 
+rR0_peakmonth_county <- read.csv("data/processed/rR0_peakmonth_county_ssp245_hist.csv") 
+```
+
+##Step 1. Format GAM data
+```{r}
+## make sure GEOID is correct format
+covariates_clean <- covariates %>% 
+  dplyr::select(-X)  %>% 
+  mutate(GEOID = str_pad(GEOID, width = 5, pad = 0), # make sure FIPS are 5 characters
+         GEOID = as.character(GEOID)) 
+
+
+rR0_peakmonth_county_clean <- rR0_peakmonth_county %>% dplyr::select(-X)  %>% 
+  mutate(GEOID = str_pad(GEOID, width = 5, pad = 0), # make sure FIPS are 5 characters
+         GEOID = as.character(GEOID)) 
+
+## merge
+gam_covariates_full <- covariates_clean %>% 
+  left_join(rR0_peakmonth_county_clean, by = "GEOID")
+
+write.csv(gam_covariates_full, file = "data/processed/gam_covariates_full.csv")
+
+```
+
+##Step 2. data checks
+```{r}
+## A. distribution of incidence
+hist(gam_covariates_full$raw_incidence) # right skewed
+hist(gam_covariates_full$log_incidence) # seems normal enough
+
+
+## B. correlation of covariates
+gam_covariates_slim <- gam_covariates_full %>% 
+  dplyr::select(raw_incidence,
+                raw_perc_over65,
+                raw_log_edgedensity_mk2,
+                raw_bls_agemploy,
+                raw_svi_mean,
+                raw_birds_tot,
+                raw_peakmonths_rR0_mean)
+
+cor_matrix <- cor(gam_covariates_slim, use = "complete.obs")
+
+ggcorrplot(cor_matrix, 
+           method = "square",     
+           type = "upper",       
+           lab = TRUE,        
+           lab_size = 6, 
+           show.legend =FALSE,
+           tl.col = "black",        
+           tl.srt = 45,)
+
+## really the only concerning one is rR0 and SVI but probably heat islands/high heat is part of the SVI metric
+```
+
+
+##Step 3. Model Construction
+```{r}
+## build model based on prior attempts
+mod_best_scaled <- gam(log_incidence ~
+                         #climate 
+                         s(scale_peakmonths_rR0_mean) +
+                         
+                         # landscape
+                         s(scale_log_edgedensity_mk2) +
+                         
+                         # human
+                         scale_bls_agemploy +
+                         s(scale_svi_mean) + 
+                         
+                         # bird
+                         scale_birds_tot +
+                         
+                         # controls
+                         scale_perc_over65 +
+                         s(lon, lat, bs = "gp"), 
+                       
+                       data = gam_covariates_full,
+                       method = "REML")
+```
+
+##Step 4. Model diagnostics
+```{r}
+# check model summary
+summary(mod_best_scaled)
+
+# check residuals
+appraise(mod_best_scaled)
+
+# visualize smooth terms
+draw(mod_best_scaled)
+```
+##Step 5. Calculate % of deviance explained for each predictor
+```{r}
+gam.hp_result <- gam.hp(mod_best_scaled)
+gam.hp_result_table <- as.data.frame(gam.hp_result$hierarchical.partitioning)
+
+names(gam.hp_result_table)[4] <- "percent"
+
+gam.hp_result_table %>% 
+  arrange(desc(percent))
+```
+
+(come back to this)
+```{r}
+# Step 1: Get smooth estimates from the model
+sm <- smooth_estimates(mod_best_scaled, term = "s(scale_peakmonths_rR0_mean)")
+
+
+# Join on the correct scale column
+sm_with_raw <- sm %>%
+  left_join(lookup, by = "scale_peakmonths_rR0_mean")
+
+ggplot(sm_with_raw, aes(x = raw_peakmonths_rR0_mean, y = .estimate)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = .estimate - .se, ymax = .estimate + .se), alpha = 0.2) +
+  labs(
+    x = "Raw rR0 mean (peak months)",
+    y = "Partial effect",
+    title = "Partial Effect of rR0 (Unscaled X-axis)"
+  ) +
+  theme_minimal() + ylim(-2,1)
+
+
+```
+
+
