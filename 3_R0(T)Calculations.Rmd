@@ -1,0 +1,1338 @@
+---
+title: "3 R0(T) Calculations"
+output: html_document
+date: "2025-08-08"
+---
+
+###Manuscript under review
+
+**Title:** Mixed landscapes, social vulnerability, and climate change shape West Nile virus risk across the United States
+
+**corresponding author:** Samantha Sambado (ssambado at stanford.edu)
+
+##Purpose
+Calculate temperature-dependent R0 for each Culex species using much of the code produced by Dr. Marta Shocket and Dr. Lisa Couper. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## upload necessary packages
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+
+## upload data
+combined_245_hist <- read.csv("data/processed/cmip6_ssp245_historic_county_long.csv") 
+combined_245_mid <- read.csv("data/processed/cmip6_ssp245_mid_county_long.csv") 
+combined_245_late <- read.csv("data/processed/cmip6_ssp245_late_county_long.csv") 
+
+combined_585_hist <- read.csv("data/processed/cmip6_ssp585_historic_county_long.csv") 
+combined_585_mid <- read.csv("data/processed/cmip6_ssp585_mid_county_long.csv") 
+combined_585_late <- read.csv("data/processed/cmip6_ssp585_late_county_long.csv") 
+```
+
+This code needs some serious TLC to make it less repetitive....
+
+
+##Step 1. Write function to prep climate data prior to R0(T)
+```{r}
+compute_monthly_meantemp <- function(df) {
+  df %>%
+    ## need to create month columns
+    mutate(date = as.Date(date),
+      month = month(date, label = TRUE, abbr = FALSE),
+      # make sure GEOID is formatted correctly
+      GEOID = str_pad(as.character(GEOID), width = 5, pad = "0")) %>%
+    # foe each GEOID-month combo
+    group_by(GEOID, month) %>%
+    # calculate mean temperature 
+    summarise(mean_temp = (mean(min_temp, na.rm = TRUE) + mean(max_temp, na.rm = TRUE)) / 2,
+      .groups = "drop") %>%
+    # want to go from long to wide for R0(T) analysis
+    pivot_wider(names_from = month,
+      values_from = mean_temp)
+}
+
+```
+
+##Step 2. Apply function to long climate datasets to make wide month temp
+```{r}
+## ssp245
+monthly_mean_ssp245_hist <- compute_monthly_meantemp(combined_245_hist)
+monthly_mean_ssp245_mid <- compute_monthly_meantemp(combined_245_mid)
+monthly_mean_ssp245_late <- compute_monthly_meantemp(combined_245_late)
+
+## ssp585
+monthly_mean_ssp585_hist <- compute_monthly_meantemp(combined_585_hist)
+monthly_mean_ssp585_mid <- compute_monthly_meantemp(combined_585_mid)
+monthly_mean_ssp585_late <- compute_monthly_meantemp(combined_585_late)
+```
+
+
+##Step 3. Convert to matrix for multiR0
+```{r}
+## ssp245
+monthly_mean_ssp245_hist_matrix <- as.matrix(monthly_mean_ssp245_hist[,-1])
+rownames(monthly_mean_ssp245_hist_matrix) <- monthly_mean_ssp245_hist$GEOID
+
+monthly_mean_ssp245_mid_matrix <- as.matrix(monthly_mean_ssp245_mid[,-1])
+rownames(monthly_mean_ssp245_mid_matrix) <- monthly_mean_ssp245_mid$GEOID
+
+monthly_mean_ssp245_late_matrix <- as.matrix(monthly_mean_ssp245_late[,-1])
+rownames(monthly_mean_ssp245_late_matrix) <- monthly_mean_ssp245_late$GEOID
+
+
+## ssp585
+monthly_mean_ssp585_hist_matrix <- as.matrix(monthly_mean_ssp585_hist[,-1])
+rownames(monthly_mean_ssp585_hist_matrix) <- monthly_mean_ssp585_hist$GEOID
+
+monthly_mean_ssp585_mid_matrix <- as.matrix(monthly_mean_ssp585_mid[,-1])
+rownames(monthly_mean_ssp585_mid_matrix) <- monthly_mean_ssp585_mid$GEOID
+
+monthly_mean_ssp585_late_matrix <- as.matrix(monthly_mean_ssp585_late[,-1])
+rownames(monthly_mean_ssp585_late_matrix) <- monthly_mean_ssp585_late$GEOID
+
+```
+
+
+##Step 4. Define R0(T) components
+
+###Universal functional forms
+```{r}
+####### FUNCTIONAL FORMS
+# Briere
+briere_function <- function(Temp, Tmin, Tmax, c) {
+  if (is.na(Temp)) {
+    return(NA)
+  } else if (Temp > Tmin & Temp < Tmax) {
+    return(c * Temp * (Temp - Tmin) * sqrt(Tmax - Temp))
+  } else {
+    return(0)
+  }
+}
+
+# Quadratic
+quadratic_function <- function(Temp, Tmin, Tmax, a, b, c) {
+  if (is.na(Temp)) {
+    return(NA)
+  } else if (Temp > Tmin & Temp < Tmax) {
+    return(a * (Temp - Tmin) * (Temp - Tmax) + b * (Temp - Tmin) + c)
+  } else {
+    return(0)
+  }
+}
+
+# Linear
+linear_function <- function(Temp, m, z) {
+  if (is.na(Temp)) {
+    return(NA)
+  } else if ((m * Temp + z) > 0) {
+    return(m * Temp + z)
+  } else {
+    return(0)
+  }
+}
+
+```
+
+###Multi R0(T) for each Culex species
+```{r}
+
+## Cx. pipiens
+R0multi_pipiens <- function(z)  { 
+  R0mat = matrix(nrow = dim(z)[1], ncol = dim(z)[2])
+  for (i in 1:dim(z)[1]) {
+    for (j in 1:dim(z)[2]) {
+      Temp = z[i, j]
+      if (is.na(Temp)) {
+        R0mat[i, j] <- NA
+      } else if (Temp < 16.8) {
+        R0mat[i, j] <- NA
+      } else {
+        R0mat[i, j] <- sqrt(
+  (BitingRate(Temp)^2 *
+   VectorCompBC(Temp) *
+   exp(-(1 / (Lifespan(Temp) * PDR(Temp)))) *
+   EFGC(Temp) * BitingRate(Temp) *
+   EV(Temp) * pLA(Temp) * MDR(Temp)) /
+   (1 / Lifespan(Temp))^3
+)
+          
+      }
+    }
+  }
+  R0mat[is.na(R0mat)] <- 0  # Convert NAs to 0
+  return(R0mat)
+}
+
+
+
+##Cx. tarsalis
+R0multi_tarsalis <- function(z)  { 
+  R0mat = matrix(nrow = dim(z)[1], ncol = dim(z)[2])
+  for (i in 1:dim(z)[1]) {
+    for (j in 1:dim(z)[2]) {
+      Temp = z[i, j]
+      if (is.na(Temp)) {
+        R0mat[i, j] <- NA
+      } else if (Temp < 11.3) {
+        R0mat[i, j] <- NA
+      } else {
+        R0mat[i, j] <- sqrt(
+  (BitingRate(Temp)^2 *
+   ProbInfB(Temp) * # * ProbInfC(Temp) 
+   exp(-(1 / (Lifespan(Temp) * PDR(Temp)))) *
+   EFGC(Temp) * BitingRate(Temp) *
+   EV(Temp) * pLA(Temp) * MDR(Temp)) /
+   (1 / Lifespan(Temp))^3
+)
+          
+      }
+    }
+  }
+  R0mat[is.na(R0mat)] <- 0  # Convert NAs to 0
+  return(R0mat)
+}
+
+
+
+##Cx. quinquefasciatus
+R0multi_quin <- function(z)  { 
+  R0mat = matrix(nrow = dim(z)[1], ncol = dim(z)[2])
+  for (i in 1:dim(z)[1]) {
+    for (j in 1:dim(z)[2]) {
+      Temp = z[i, j]
+      if (is.na(Temp)) {
+        R0mat[i, j] <- NA
+      } else if (Temp < 4.2) {
+        R0mat[i, j] <- NA
+      } else {
+        R0mat[i, j] <-  sqrt(
+  (BitingRate(Temp)^2 *
+   VectorCompBC(Temp) *
+   exp(-(1 / (Lifespan(Temp) * PDR(Temp)))) *
+   ER(Temp)*BitingRate(Temp)*pO(Temp) *EV(Temp)*pLA(Temp)*MDR(Temp)) / 
+   (1 / Lifespan(Temp))^3
+)
+          
+      }
+    }
+  }
+  R0mat[is.na(R0mat)] <- 0  # Convert NAs to 0
+  return(R0mat)
+}
+
+```
+
+
+###Vector-virus parameters
+took parameter values from Shocket 2020 eLife
+
+(WARNING - be aware of which one I run prior to R0multi)
+This code needs to be improved
+
+##Cx. pipiens - WNV
+```{r}
+BitingRate <- function(Temp) briere_function(Temp,9.4, 39.6,0.000170)
+
+VectorCompBC <- function(Temp) quadratic_function(Temp, 16.8, 38.9,0.00305, 0, 0)
+
+Lifespan <- function(Temp) linear_function(Temp, 4.86, 169.8)
+
+PDR <- function(Temp) briere_function(Temp, 11.4, 45.2, 0.0000738)
+
+EFGC <- function(Temp) quadratic_function(Temp,5.3, 38.9, 0.598, 0, 0)
+
+EV <- function(Temp) quadratic_function(Temp, 3.2, 42.6, 0.00211, 0, 0)
+
+pLA <- function(Temp) quadratic_function(Temp, 7.8, 38.4, 0.0036, 0, 0)
+
+MDR <- function(Temp) briere_function(Temp, 0.1, 38.5, 0.0000376)
+
+```
+
+Cx. pipiens - SSP245 Historic
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_pipiens(monthly_mean_ssp245_hist_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp245_hist_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_pip_ssp245_hist <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. pipiens",
+         century = "historic",
+         scenario = "ssp245") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+# save as csv
+rR0_pip_ssp245_hist %>% write.csv("data/processed/temp/cmip6_rR0_pip_ssp245_hist.csv")
+```
+
+Cx. pipiens - SSP245 Mid
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_pipiens(monthly_mean_ssp245_mid_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp245_mid_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_pip_ssp245_mid <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. pipiens",
+         century = "mid",
+         scenario = "ssp245") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+rR0_pip_ssp245_mid %>% write.csv("data/processed/temp/cmip6_rR0_pip_ssp245_mid.csv")
+```
+
+Cx. pipiens - SSP245 Late
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_pipiens(monthly_mean_ssp245_late_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp245_late_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_pip_ssp245_late <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. pipiens",
+         century = "late",
+         scenario = "ssp245") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+rR0_pip_ssp245_late %>% write.csv("data/processed/temp/cmip6_rR0_pip_ssp245_late.csv")
+```
+
+Cx. pipiens - SSP585 Historic
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_pipiens(monthly_mean_ssp585_hist_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp585_hist_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_pip_ssp585_hist <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. pipiens",
+         century = "historic",
+         scenario = "ssp585") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+# save as csv
+rR0_pip_ssp585_hist %>% write.csv("data/processed/temp/cmip6_rR0_pip_ssp585_hist.csv")
+```
+
+Cx. pipiens - SSP585 Mid
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_pipiens(monthly_mean_ssp585_mid_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp585_mid_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_pip_ssp585_mid <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. pipiens",
+         century = "mid",
+         scenario = "ssp585") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+rR0_pip_ssp585_mid %>% write.csv("data/processed/temp/cmip6_rR0_pip_ssp585_mid.csv")
+```
+
+Cx. pipiens - SSP585 Late
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_pipiens(monthly_mean_ssp585_late_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp585_late_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_pip_ssp585_late <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. pipiens",
+         century = "late",
+         scenario = "ssp585") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+rR0_pip_ssp585_late %>% write.csv("data/processed/temp/cmip6_rR0_pip_ssp585_late.csv")
+```
+
+
+##Cx. tarsalis - WNV
+```{r}
+BitingRate <- function(Temp) briere_function(Temp, 2.3, 32.0, 0.000167)
+
+ProbInfB <- function(Temp) quadratic_function(Temp, 11.3, 41.9, 0.00294, 0, 0) 
+
+Lifespan <- function(Temp) linear_function(Temp, 1.69, 69.6)
+
+PDR <- function(Temp) briere_function(Temp, 11.2, 44.7, 0.0000657)
+
+EFGC <- function(Temp) quadratic_function(Temp,5.3, 38.9, 0.598, 0, 0) # use pip
+
+EV <- function(Temp) quadratic_function(Temp, 3.2, 42.6, 0.00211, 0, 0) # use pip
+
+pLA <- function(Temp) quadratic_function(Temp, 5.9, 43.1, 0.00294, 0, 0)
+
+
+MDR <- function(Temp) briere_function(Temp, 4.3, 39.9, 0.0000412)
+```
+
+
+
+Cx. tarsalis - SSP245 Historic
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_tarsalis(monthly_mean_ssp245_hist_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp245_hist_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_tar_ssp245_hist <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. tarsalis",
+         century = "historic",
+         scenario = "ssp245") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+# save as csv
+rR0_tar_ssp245_hist %>% write.csv("data/processed/temp/cmip6_rR0_tar_ssp245_hist.csv")
+```
+
+Cx. tarsalis - SSP245 Mid
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_tarsalis(monthly_mean_ssp245_mid_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp245_mid_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_tar_ssp245_mid <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. tarsalis",
+         century = "mid",
+         scenario = "ssp245") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+rR0_tar_ssp245_mid %>% write.csv("data/processed/temp/cmip6_rR0_tar_ssp245_mid.csv")
+```
+
+Cx. tarsalis - SSP245 Late
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_tarsalis(monthly_mean_ssp245_late_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp245_late_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_tar_ssp245_late <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. tarsalis",
+         century = "late",
+         scenario = "ssp245") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+rR0_tar_ssp245_late %>% write.csv("data/processed/temp/cmip6_rR0_tar_ssp245_late.csv")
+```
+
+Cx. tarsalis - SSP585 Historic
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_tarsalis(monthly_mean_ssp585_hist_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp585_hist_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_tar_ssp585_hist <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. tarsalis",
+         century = "historic",
+         scenario = "ssp585") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+# save as csv
+rR0_tar_ssp585_hist %>% write.csv("data/processed/temp/cmip6_rR0_tar_ssp585_hist.csv")
+```
+
+Cx. tarsalis - SSP585 Mid
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_tarsalis(monthly_mean_ssp585_mid_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp585_mid_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_tar_ssp585_mid <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. tarsalis",
+         century = "mid",
+         scenario = "ssp585") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+rR0_tar_ssp585_mid %>% write.csv("data/processed/temp/cmip6_rR0_tar_ssp585_mid.csv")
+```
+
+Cx. tarsalis - SSP585 Late
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_tarsalis(monthly_mean_ssp585_late_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp585_late_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_tar_ssp585_late <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. tarsalis",
+         century = "late",
+         scenario = "ssp585") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+rR0_tar_ssp585_late %>% write.csv("data/processed/temp/cmip6_rR0_tar_ssp585_late.csv")
+```
+
+
+##Cx. quinquefasciatus - WNV
+```{r}
+BitingRate <- function(Temp) briere_function(Temp, 3.1, 39.3, 0.0000728)
+
+VectorCompBC <- function(Temp) quadratic_function(Temp, 4.2, 45.2, .00232, 0, 0) # use Cx. uni
+
+Lifespan <- function(Temp) linear_function(Temp, 3.8, 136.3)
+
+
+PDR <- function(Temp) briere_function(Temp, 19.0, 44.1, 0.0000712)
+
+ER <- function(Temp) quadratic_function(Temp, 5.0, 37.7, 0.0636, 0, 0)
+
+pO <- function(Temp) quadratic_function(Temp, 1.7, 31.8, 0.000667, 0, 0) # briere was not working
+
+EV <- function(Temp) briere_function(Temp, 13.6, 38.0, 0.0047)
+
+
+pLA <- function(Temp) quadratic_function(Temp, 8.9, 37.7, 0.00426, 0, 0)
+
+
+MDR <- function(Temp) briere_function(Temp, 0.1, 38.6, 0.0000414)
+
+
+```
+
+
+Cx. quinquefasciatus - SSP245 Historic
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_quin(monthly_mean_ssp245_hist_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp245_hist_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_quin_ssp245_hist <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. quinquefasciatus",
+         century = "historic",
+         scenario = "ssp245") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+# save as csv
+rR0_quin_ssp245_hist %>% write.csv("data/processed/temp/cmip6_rR0_quin_ssp245_hist.csv")
+```
+
+Cx. quinquefasciatus - SSP245 Mid
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_quin(monthly_mean_ssp245_mid_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp245_mid_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_quin_ssp245_mid <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. quinquefasciatus",
+         century = "mid",
+         scenario = "ssp245") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+rR0_quin_ssp245_mid %>% write.csv("data/processed/temp/cmip6_rR0_quin_ssp245_mid.csv")
+```
+
+Cx. quinquefasciatus - SSP245 Late
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_quin(monthly_mean_ssp245_late_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp245_late_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_quin_ssp245_late <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. quinquefasciatus",
+         century = "late",
+         scenario = "ssp245") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+rR0_quin_ssp245_late %>% write.csv("data/processed/temp/cmip6_rR0_quin_ssp245_late.csv")
+```
+
+Cx. quinquefasciatus - SSP585 Historic
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_quin(monthly_mean_ssp585_hist_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp585_hist_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_quin_ssp585_hist <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. quinquefasciatus",
+         century = "historic",
+         scenario = "ssp585") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+# save as csv
+rR0_quin_ssp585_hist %>% write.csv("data/processed/temp/cmip6_rR0_quin_ssp585_hist.csv")
+```
+
+Cx. quinquefasciatus - SSP585 Mid
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_quin(monthly_mean_ssp585_mid_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp585_mid_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_quin_ssp585_mid <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. quinquefasciatus",
+         century = "mid",
+         scenario = "ssp585") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+rR0_quin_ssp585_mid %>% write.csv("data/processed/temp/cmip6_rR0_quin_ssp585_mid.csv")
+```
+
+Cx. quinquefasciatus - SSP585 Late
+```{r}
+### will need to change this out for each one but at this point not worth trying to figure out loop
+# calculate 
+dfR0 = R0multi_quin(monthly_mean_ssp585_late_matrix)
+
+#assign 0 to NA values
+dfR0[is.na(dfR0)] <- 0
+
+# rescale matrix to calcuhistoric a relative R0 
+mn = min(dfR0); mx = max(dfR0);
+dfR0r = (dfR0 - mn) / (mx - mn)
+
+
+#Step 5. Prep rR0 for mapping
+
+# Convert the matrix to a data frame 
+dfR0r_df <- as.data.frame(dfR0r)
+
+# Add GEOID as a new column
+dfR0r_df$GEOID <- rownames(monthly_mean_ssp585_late_matrix)
+
+# Rearrange the columns so that GEOID comes first
+dfR0r_df <- dfR0r_df[, c(ncol(dfR0r_df), 1:(ncol(dfR0r_df)-1))]
+
+
+## Step 6. make spatial dataframe
+# Make sure the GEOID column is the same format in both datasets (as character)
+dfR0r_df$GEOID <- as.character(dfR0r_df$GEOID)
+counties_sf$GEOID <- as.character(counties_sf$GEOID)
+
+# Merge the R0 data frame with the spatial data (counties_sf)
+merged_sf <- counties_sf %>%
+  left_join(dfR0r_df, by = "GEOID")
+
+## Step 7. Wrangle it
+rR0_quin_ssp585_late <- merged_sf %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, V1:V12) %>% #changed V1:V12
+  mutate(annual_avgrR0 = rowMeans(across(V1:V12), na.rm = TRUE)) %>% 
+  dplyr::rename_with(.cols = V1:V12, 
+                     .fn = ~ month.name[1:12]) %>% 
+  mutate(peakmonths_avgrR0 = rowMeans(across(April:October), na.rm = TRUE)) %>% 
+  mutate(species = "Cx. quinquefasciatus",
+         century = "late",
+         scenario = "ssp585") %>% 
+  dplyr::select(GEOID, species, century, scenario,
+                annual_avgrR0, peakmonths_avgrR0,
+                January:December) 
+
+rR0_quin_ssp585_late %>% write.csv("data/processed/temp/cmip6_rR0_quin_ssp585_late.csv")
+```
+
+
+##GAM rR0 covaritate
+Need to calculate annual average rR0 across all species per county (only use rR0 for peak months April-October)
+```{r}
+rR0_pip_ssp245_hist  <- read.csv("data/processed/temp/cmip6_rR0_pip_ssp245_hist.csv") %>% dplyr::select(-X)  %>% 
+  mutate(GEOID = str_pad(GEOID, width = 5, pad = 0), # make sure FIPS are 5 characters
+         GEOID = as.character(GEOID)) 
+rR0_tar_ssp245_hist  <- read.csv("data/processed/temp/cmip6_rR0_tar_ssp245_hist.csv") %>% dplyr::select(-X)  %>% 
+  mutate(GEOID = str_pad(GEOID, width = 5, pad = 0), # make sure FIPS are 5 characters
+         GEOID = as.character(GEOID)) 
+rR0_quin_ssp245_hist <- read.csv("data/processed/temp/cmip6_rR0_quin_ssp245_hist.csv") %>% dplyr::select(-X)  %>% 
+  mutate(GEOID = str_pad(GEOID, width = 5, pad = 0), # make sure FIPS are 5 characters
+         GEOID = as.character(GEOID)) 
+
+rR0_peakmonth_county <- rbind(rR0_pip_ssp245_hist, rR0_tar_ssp245_hist, rR0_quin_ssp245_hist) %>% 
+  group_by(GEOID) %>% 
+  summarise(raw_peakmonths_rR0_mean = mean(peakmonths_avgrR0, na.rm = TRUE)) %>% 
+  mutate(scale_peakmonths_rR0_mean = scale(raw_peakmonths_rR0_mean))
+
+write.csv(rR0_peakmonth_county, "data/processed/rR0_peakmonth_county_ssp245_hist.csv")
+```
+
+##Combine all into rR0 for projected risk
+```{r}
+# upload all
+cmip6_file <- list.files(path = "data/processed/temp/",
+                         pattern = "^cmip6_.*\\.csv$",
+                         full.names = TRUE)
+
+cmip6_list <- map(cmip6_file, read_csv)
+
+cmip6_combine <- bind_rows(cmip6_list)
+
+cmip6_rR0_allspecies <- cmip6_combine %>% 
+  dplyr::select(-"...1" )
+
+write.csv(cmip6_rR0_allspecies, file = "data/processed/cmip6_rR0_allspecies.csv")
+```
+
+
+##Calculate absolute means (Table 2)
+```{r}
+cmip6_rR0_allspecies <- read.csv("data/processed/cmip6_rR0_allspecies.csv")
+## first format to help with calculation
+cmip6_rR0_allspecies_wide <- cmip6_rR0_allspecies %>% 
+  pivot_wider(names_from = century,
+              values_from = peakmonths_avgrR0,
+              id_cols = c("species", "scenario"),
+              values_fn = mean)
+
+
+## calculate difference from current/historic to other time points
+cmip6_rR0_allspecies_diff <- cmip6_rR0_allspecies_wide %>% 
+  mutate(diff_mid = mid - historic,
+         diff_late = late - historic)
+
+## now group by species and time points/scenarios
+cmip6_rR0_allspecies_diff %>% 
+  filter(scenario != "ssp245") %>% 
+  group_by(species) %>% 
+  summarise(diff_mid_mean = mean(diff_mid, na.rm = TRUE),
+            #diff_mid_sd = sd(diff_mid, na.rm = TRUE),
+            
+            diff_late_mean = mean(diff_late, na.rm = TRUE),
+            #diff_late_sd = sd(diff_late, na.rm = TRUE),
+            .groups = "drop") %>% 
+  mutate(across(ends_with("_mean"), ~ round(.x, 2)),
+         across(ends_with("_sd"), ~ round(.x, 2)))
+
+
+```
+
+
