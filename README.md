@@ -6,7 +6,7 @@ manuscript in prep - code is subject to change.
 
 **corresponding author:** Samantha Sambado (ssambado@stanford.edu) 
 
-*Note:* These files are meant to show the workflow of various components. Data files will be hosted on Dryad (link coming soon).
+*Note:* These files are meant to show the workflow of various components. Data files will be hosted on Dryad (https://doi.org/10.5061/dryad.dz08kps9j).
 
 **Software**
 R version 4.4.1
